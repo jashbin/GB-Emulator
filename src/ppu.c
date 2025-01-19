@@ -13,12 +13,27 @@
 #define WINDOW_TILES_WIDTH 512
 #define WINDOW_TILES_HEIGHT 512
 
+#define HBLANK_DURATION (204 * 4)
+#define OAM_SCAN_DURATION (80 * 4)
+#define DRAWING_PIXELS_DURATION (172 * 4)
+#define SCAN_LINE_DURATION (OAM_SCAN_DURATION + DRAWING_PIXELS_DURATION + HBLANK_DURATION)
+
+typedef enum
+{
+    HBLANK = 0,
+    VBLANK = 1,
+    OAM_SCAN = 2,
+    DRAWING_PIXELS = 3,
+} ppu_mode_t;
+
 static bool get_tile_data_start_addr(uint16_t *start_addr);
 static void print_tiles(void);
 static void print_bg_tiles_map(void);
 static void print_window_tiles_map(void);
 
+ppu_mode_t ppu_mode = OAM_SCAN;
 uint64_t scan_line_clock = 0;
+
 static struct timeval time_last_frame;
 static uint64_t diff_sum = 0;
 static uint64_t nb_frame = 0;
@@ -134,90 +149,198 @@ void ppu_destroy(void)
 
 void ppu_execute(uint64_t clock_cycles)
 {
-    bool lcd_on = memory_get_reg_value(MEMORY_REG_LCDC, MEMORY_LCDC_PPU_ENABLED);
     uint8_t ly;
     memory_read(&ly, MEMORY_REG_LY, 1);
-
-    if (!lcd_on)
-    {
-        // fprintf(stderr, P_PPU "LCD OFF\n");
-        memory_write_8(MEMORY_REG_LY, 0);
-        scan_line_clock = 0;
-        return;
-    }
 
     // Update Clock cycles
     scan_line_clock += clock_cycles;
 
-    if (scan_line_clock >= CLOCK_CYCLES_PER_SCANLINE)
+    switch (ppu_mode)
     {
-        scan_line_clock = 0;
-        ly = (ly == 153) ? 0 : ly + 1;
-        memory_write_8(MEMORY_REG_LY, ly);
-
-        // Render Scan lines (144 pixels in height)
-        if (ly < 144)
+    case OAM_SCAN:
+        if (scan_line_clock >= OAM_SCAN_DURATION)
         {
 #ifdef DEBUG
             if (verbose & VERBOSE_PPU)
             {
-                // fprintf(stderr, P_PPU "Rendered Line %u\n", ly);
+                fprintf(stderr, P_PPU "OAM scan\n");
             }
 #endif
+
+            scan_line_clock -= OAM_SCAN_DURATION;
+            ppu_mode = DRAWING_PIXELS;
         }
-        else if (ly == 144)
+        break;
+
+    case DRAWING_PIXELS:
+        if (scan_line_clock >= DRAWING_PIXELS_DURATION)
         {
 #ifdef DEBUG
             if (verbose & VERBOSE_PPU)
             {
-                fprintf(stderr, P_PPU "Request VBlank interrupt\n");
+                fprintf(stderr, P_PPU "Drawing pixels\n");
             }
-            // if (memory_get_reg_value(MEMORY_REG_IF, MEMORY_IEF_VBLANK))
-            // {
-            print_tiles();
-            print_bg_tiles_map();
-            print_window_tiles_map();
-            // SDL_Delay(50);
-
-            // FPS
-            struct timeval curr_time;
-            gettimeofday(&curr_time, NULL);
-            uint64_t diff = (curr_time.tv_sec - time_last_frame.tv_sec) * 1000000 + curr_time.tv_usec - time_last_frame.tv_usec;
-            nb_frame++;
-            diff_sum += diff;
-            // fprintf(stderr, P_PPU "curr_time: ");
-            fprintf(stderr, P_PPU "FPS: %g\n", (1 / (diff_sum / (double)nb_frame)) * 1000000);
-            time_last_frame = curr_time;
-            // }
 #endif
-            // End of frame
-            // Request VBlank interrupt
-            memory_write_reg_value(MEMORY_REG_IF, MEMORY_IEF_VBLANK, true);
-        }
 
-        // Check LYC == LY
-        if (memory_read_8(MEMORY_REG_LYC) == ly)
+            scan_line_clock -= DRAWING_PIXELS_DURATION;
+            ppu_mode = HBLANK;
+        }
+        break;
+
+    case HBLANK:
+        if (scan_line_clock >= HBLANK_DURATION)
         {
 #ifdef DEBUG
             if (verbose & VERBOSE_PPU)
             {
-                fprintf(stderr, P_PPU "LYC == LY\n");
+                fprintf(stderr, P_PPU "HBlank\n");
             }
 #endif
-            memory_write_reg_value(MEMORY_REG_STAT, MEMORY_STAT_COINCID_FLAG, true);
+            ly += 1;
+            memory_write_8(MEMORY_REG_LY, ly);
 
-            // If the LY == LYC interrupt is enabled, request it
-            if (memory_get_reg_value(MEMORY_REG_STAT, MEMORY_STAT_COINCID_INT))
+            scan_line_clock -= HBLANK_DURATION;
+            if (ly >= 144)
             {
-                memory_write_reg_value(MEMORY_REG_IF, MEMORY_IEF_LCD_STAT, true);
+                ppu_mode = VBLANK;
+            }
+            else
+            {
+                ppu_mode = OAM_SCAN;
             }
         }
-        else
+        break;
+
+    case VBLANK:
+        if (scan_line_clock >= SCAN_LINE_DURATION)
         {
-            memory_write_reg_value(MEMORY_REG_STAT, MEMORY_STAT_COINCID_FLAG, false);
+#ifdef DEBUG
+            if (verbose & VERBOSE_PPU)
+            {
+                fprintf(stderr, P_PPU "VBlank\n");
+            }
+#endif
+            ly += 1;
+
+            fprintf(stderr, P_PPU "LY: %u\n", ly);
+            if (ly <= 153)
+            {
+                memory_write_8(MEMORY_REG_LY, ly);
+                scan_line_clock -= SCAN_LINE_DURATION;
+            }
+            else
+            {
+                ly = 0;
+                memory_write_8(MEMORY_REG_LY, 0);
+                ppu_mode = OAM_SCAN;
+            }
         }
+        break;
     }
+
+#ifdef DEBUG
+    static uint8_t print_counter = 0;
+    if (ly == 0)
+        print_counter++;
+    if (print_counter > 20)
+    {
+        print_counter = 0;
+        print_tiles();
+        print_bg_tiles_map();
+        print_window_tiles_map();
+    }
+#endif
+
+    memory_write_reg_value(MEMORY_REG_STAT, MEMORY_STAT_COINCID_FLAG, (memory_read_8(MEMORY_REG_LYC) == ly));
 }
+
+// void ppu_execute(uint64_t clock_cycles)
+// {
+//     bool lcd_on = memory_get_reg_value(MEMORY_REG_LCDC, MEMORY_LCDC_PPU_ENABLED);
+//     uint8_t ly;
+//     memory_read(&ly, MEMORY_REG_LY, 1);
+
+//     if (!lcd_on)
+//     {
+//         // fprintf(stderr, P_PPU "LCD OFF\n");
+//         memory_write_8(MEMORY_REG_LY, 0);
+//         scan_line_clock = 0;
+//         return;
+//     }
+
+//     // Update Clock cycles
+//     scan_line_clock += clock_cycles;
+
+//     if (scan_line_clock >= CLOCK_CYCLES_PER_SCANLINE)
+//     {
+//         scan_line_clock -= CLOCK_CYCLES_PER_SCANLINE;
+//         ly = (ly == 153) ? 0 : ly + 1;
+//         memory_write_8(MEMORY_REG_LY, ly);
+
+//         // Render Scan lines (144 pixels in height)
+//         if (ly < 144)
+//         {
+// #ifdef DEBUG
+//             if (verbose & VERBOSE_PPU)
+//             {
+//                 // fprintf(stderr, P_PPU "Rendered Line %u\n", ly);
+//             }
+// #endif
+//         }
+//         else if (ly == 144)
+//         {
+// #ifdef DEBUG
+//             if (verbose & VERBOSE_PPU)
+//             {
+//                 fprintf(stderr, P_PPU "Request VBlank interrupt\n");
+//             }
+//             // if (memory_get_reg_value(MEMORY_REG_IF, MEMORY_IEF_VBLANK))
+//             // {
+
+//             // SDL_Delay(50);
+
+//             // FPS
+//             struct timeval curr_time;
+//             gettimeofday(&curr_time, NULL);
+//             uint64_t diff = (curr_time.tv_sec - time_last_frame.tv_sec) * 1000000 + curr_time.tv_usec - time_last_frame.tv_usec;
+//             nb_frame++;
+//             diff_sum += diff;
+//             // fprintf(stderr, P_PPU "curr_time: ");
+//             fprintf(stderr, P_PPU "FPS: %g\n", (1 / (diff_sum / (double)nb_frame)) * 1000000);
+//             time_last_frame = curr_time;
+//             // }
+// #endif
+//             // End of frame
+//             // Request VBlank interrupt
+//             memory_write_reg_value(MEMORY_REG_IF, MEMORY_IEF_VBLANK, true);
+//         }
+
+//         // Check LYC == LY
+//         if (memory_read_8(MEMORY_REG_LYC) == ly)
+//         {
+// #ifdef DEBUG
+//             if (verbose & VERBOSE_PPU)
+//             {
+//                 fprintf(stderr, P_PPU "LYC == LY\n");
+//                 print_tiles();
+//                 print_bg_tiles_map();
+//                 print_window_tiles_map();
+//             }
+// #endif
+//             memory_write_reg_value(MEMORY_REG_STAT, MEMORY_STAT_COINCID_FLAG, true);
+
+//             // If the LY == LYC interrupt is enabled, request it
+//             if (memory_get_reg_value(MEMORY_REG_STAT, MEMORY_STAT_COINCID_INT))
+//             {
+//                 memory_write_reg_value(MEMORY_REG_IF, MEMORY_IEF_LCD_STAT, true);
+//             }
+//         }
+//         else
+//         {
+//             memory_write_reg_value(MEMORY_REG_STAT, MEMORY_STAT_COINCID_FLAG, false);
+//         }
+//     }
+// }
 
 // Return True if the tile number is a signed integer
 static bool get_tile_data_start_addr(uint16_t *start_addr)
@@ -314,8 +437,8 @@ static void print_tiles(void)
     if (signed_addr)
         offset = 128;
 
-    SDL_SetRenderDrawColor(pRendererTiles, 255, 255, 255, 0);
-    SDL_RenderClear(pRendererTiles);
+    // SDL_SetRenderDrawColor(pRendererTiles, 255, 255, 255, 0);
+    // SDL_RenderClear(pRendererTiles);
 
     // Display Bank 0/2
     for (uint16_t i = 0; i < 128; i++)
@@ -421,8 +544,8 @@ static void print_bg_tiles_map(void)
     if (verbose & VERBOSE_PPU)
         fprintf(stderr, P_PPU "Tiles BG Map start addr: 0x%x\n", bg_map_addr);
 
-    SDL_SetRenderDrawColor(pRendererTilesBGMap, 255, 255, 255, 0);
-    SDL_RenderClear(pRendererTilesBGMap);
+    // SDL_SetRenderDrawColor(pRendererTilesBGMap, 255, 255, 255, 0);
+    // SDL_RenderClear(pRendererTilesBGMap);
 
     for (uint8_t y = 0; y < 32; y++)
     {
@@ -488,8 +611,8 @@ static void print_window_tiles_map(void)
     if (verbose & VERBOSE_PPU)
         fprintf(stderr, P_PPU "Tiles Window Map start addr: 0x%x\n", window_map_addr);
 
-    SDL_SetRenderDrawColor(pRendererTilesWindowMap, 255, 255, 255, 0);
-    SDL_RenderClear(pRendererTilesWindowMap);
+    // SDL_SetRenderDrawColor(pRendererTilesWindowMap, 255, 255, 255, 0);
+    // SDL_RenderClear(pRendererTilesWindowMap);
 
     for (uint8_t y = 0; y < 32; y++)
     {
