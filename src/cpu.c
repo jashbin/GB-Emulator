@@ -18,10 +18,11 @@
 
 #define SET_BIT(val, nb_bit) (val |= (1U << nb_bit))
 #define CLEAR_BIT(val, nb_bit) (val &= ~(1U << nb_bit))
+#define FLIP_BIT(val, nb_bit) (val ^= (1U << nb_bit))
 #define CHECK_BIT(val, nb_bit) ((val >> nb_bit) & 1U)
 
 #define HAS_HALF_CARRY_ON_SUB(op1, result) (((result) & (~(op1))) & 0xf)
-#define HAS_HALF_CARRY_ON_ADD(op1, op2) (((op1)&0xf) & ((op2)&0xf))
+#define HAS_HALF_CARRY_ON_ADD(op1, op2) (((op1) & 0xf) & ((op2) & 0xf))
 
 static struct
 {
@@ -76,7 +77,7 @@ static uint64_t nb_exec_inst = 0;
 static bool running = true;
 static bool to_continue = false;
 static uint16_t to_execute = 0;
-uint8_t verbose = VERBOSE_PPU; // Extern
+uint8_t verbose = VERBOSE_CPU; // Extern
 static uint16_t breakpoint_addr = 0x0000;
 
 static char last_command[COMMAND_MAX_SIZE];
@@ -324,6 +325,55 @@ uint64_t cpu_execute_inst(void)
         clock_cycles = 12;
         break;
 
+    case 0x03: // INC BC
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - INC BC\n", registers.pc, inst);
+        }
+#endif
+        registers.bc++;
+
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Set BC to 0x%x\n", registers.bc);
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 8;
+        break;
+
+    case 0x04: // INC B
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - INC B\n", registers.pc, inst);
+        }
+#endif
+        registers.b++;
+
+        CLEAR_BIT(registers.f, FLAG_N);
+        if (!registers.b)
+            SET_BIT(registers.f, FLAG_Z);
+        else
+            CLEAR_BIT(registers.f, FLAG_Z);
+        if (HAS_HALF_CARRY_ON_ADD(registers.b - 1, 1))
+            SET_BIT(registers.f, FLAG_H);
+        else
+            CLEAR_BIT(registers.f, FLAG_H);
+
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Inc B to 0x%x\n", registers.b);
+            print_flags();
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 4;
+        break;
+
     case 0x05: // DEC B
 #ifdef DEBUG
         if (verbose & VERBOSE_CPU)
@@ -527,6 +577,66 @@ uint64_t cpu_execute_inst(void)
 #endif
         registers.pc++;
         clock_cycles = 8;
+        break;
+
+    case 0x14: // INC D
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - INC D\n", registers.pc, inst);
+        }
+#endif
+        registers.d++;
+
+        CLEAR_BIT(registers.f, FLAG_N);
+        if (!registers.d)
+            SET_BIT(registers.f, FLAG_Z);
+        else
+            CLEAR_BIT(registers.f, FLAG_Z);
+        if (HAS_HALF_CARRY_ON_ADD(registers.d - 1, 1))
+            SET_BIT(registers.f, FLAG_H);
+        else
+            CLEAR_BIT(registers.f, FLAG_H);
+
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Inc D to 0x%x\n", registers.d);
+            print_flags();
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 4;
+        break;
+
+    case 0x15: // DEC D
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - DEC D\n", registers.pc, inst);
+        }
+#endif
+        registers.d--;
+
+        SET_BIT(registers.f, FLAG_N);
+        if (!registers.d)
+            SET_BIT(registers.f, FLAG_Z);
+        else
+            CLEAR_BIT(registers.f, FLAG_Z);
+        if (HAS_HALF_CARRY_ON_SUB(registers.d + 1, registers.d))
+            SET_BIT(registers.f, FLAG_H);
+        else
+            CLEAR_BIT(registers.f, FLAG_H);
+
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Dec D to 0x%x\n", registers.d);
+            print_flags();
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 4;
         break;
 
     case 0x16: // LD D, nn
@@ -906,6 +1016,27 @@ uint64_t cpu_execute_inst(void)
         clock_cycles = 8;
         break;
 
+    case 0x3f: // CCF
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - CCF\n", registers.pc, inst);
+        }
+#endif
+        CLEAR_BIT(registers.f, FLAG_N);
+        CLEAR_BIT(registers.f, FLAG_H);
+        FLIP_BIT(registers.f, FLAG_C);
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            print_flags();
+        }
+#endif
+
+        registers.pc += 1;
+        clock_cycles = 4;
+        break;
+
     case 0x40: // LD B, B
 #ifdef DEBUG
         if (verbose & VERBOSE_CPU)
@@ -1104,6 +1235,24 @@ uint64_t cpu_execute_inst(void)
         clock_cycles = 4;
         break;
 
+    case 0x7d: // LD A, L
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - LD A, L\n", registers.pc, inst);
+        }
+#endif
+        registers.a = registers.l;
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Load L(0x%x) in A\n", registers.l);
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 4;
+        break;
+
     case 0x7e: // LD A, (HL)
 #ifdef DEBUG
         if (verbose & VERBOSE_CPU)
@@ -1121,6 +1270,82 @@ uint64_t cpu_execute_inst(void)
 #endif
         registers.pc++;
         clock_cycles = 8;
+        break;
+
+    case 0x7f: // LD A, A
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - LD A, A\n", registers.pc, inst);
+        }
+#endif
+        registers.a = registers.a;
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Load A(0x%x) in A\n", registers.a);
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 4;
+        break;
+
+    case 0x80: // ADD A, B
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - ADD A, B\n", registers.pc, inst);
+        }
+#endif
+        registers.f = 0;
+        if (HAS_HALF_CARRY_ON_ADD(registers.a, registers.b))
+            SET_BIT(registers.f, FLAG_H);
+        if (((uint16_t)registers.a + (uint16_t)registers.b) > 0xff)
+            SET_BIT(registers.f, FLAG_C);
+
+        registers.a += registers.b;
+
+        if (!registers.a)
+            SET_BIT(registers.f, FLAG_Z);
+
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Set A to 0x%x\n", registers.a);
+            print_flags();
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 4;
+        break;
+
+    case 0x81: // ADD A, C
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - ADD A, C\n", registers.pc, inst);
+        }
+#endif
+        registers.f = 0;
+        if (HAS_HALF_CARRY_ON_ADD(registers.a, registers.c))
+            SET_BIT(registers.f, FLAG_H);
+        if (((uint16_t)registers.a + (uint16_t)registers.c) > 0xff)
+            SET_BIT(registers.f, FLAG_C);
+
+        registers.a += registers.c;
+
+        if (!registers.a)
+            SET_BIT(registers.f, FLAG_Z);
+
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Set A to 0x%x\n", registers.a);
+            print_flags();
+        }
+#endif
+        registers.pc++;
+        clock_cycles = 4;
         break;
 
     case 0x87: // ADD A, A
@@ -1286,6 +1511,40 @@ uint64_t cpu_execute_inst(void)
         clock_cycles = 4;
         break;
 
+    case 0xbf: // CP A
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - CP A\n", registers.pc, inst);
+        }
+#endif
+        int16_t cmp = registers.a - registers.a;
+
+        SET_BIT(registers.f, FLAG_N);
+        if (!cmp)
+            SET_BIT(registers.f, FLAG_Z);
+        else
+            CLEAR_BIT(registers.f, FLAG_Z);
+        if (HAS_HALF_CARRY_ON_SUB(registers.a, cmp))
+            SET_BIT(registers.f, FLAG_H);
+        else
+            CLEAR_BIT(registers.f, FLAG_H);
+        if (cmp < 0)
+            SET_BIT(registers.f, FLAG_C);
+        else
+            CLEAR_BIT(registers.f, FLAG_C);
+
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            print_flags();
+        }
+#endif
+
+        registers.pc++;
+        clock_cycles = 4;
+        break;
+
     case 0xc1: // POP BC - RR=(SP), SP=SP+2
 #ifdef DEBUG
         if (verbose & VERBOSE_CPU)
@@ -1321,6 +1580,42 @@ uint64_t cpu_execute_inst(void)
         }
 #endif
         clock_cycles = 16;
+        break;
+
+    case 0xc4: // call NZ, nnnn  , SP=SP-2, (SP)=PC, PC=nnnn
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - call NZ, nnnn    , SP=SP-2, (SP)=PC, PC=nnnn\n", registers.pc, inst);
+        }
+#endif
+        call_addr = memory_read_16(registers.pc + 1);
+
+        if (!CHECK_BIT(registers.f, FLAG_Z))
+        {
+            registers.sp -= 2;
+            memory_write_16(registers.sp, registers.pc + 3);
+            registers.pc = call_addr;
+#ifdef DEBUG
+            if (verbose & VERBOSE_CPU)
+            {
+                fprintf(stderr, P_INFO "Save PC(0x%x) at 0x%x\n", memory_read_16(registers.sp), registers.sp);
+                fprintf(stderr, P_INFO "Call to 0x%x\n", registers.pc);
+            }
+#endif
+            clock_cycles = 24;
+        }
+        else
+        {
+#ifdef DEBUG
+            if (verbose & VERBOSE_CPU)
+            {
+                fprintf(stderr, P_INFO "No call\n");
+            }
+#endif
+            registers.pc += 3;
+            clock_cycles = 12;
+        }
         break;
 
     case 0xc5: // PUSH BC - SP=SP-2, (SP)=rr
@@ -1787,7 +2082,7 @@ uint64_t cpu_execute_inst(void)
             SET_BIT(registers.f, FLAG_Z);
         else
             CLEAR_BIT(registers.f, FLAG_Z);
-        if (HAS_HALF_CARRY_ON_SUB(registers.c + 1, registers.c))
+        if (HAS_HALF_CARRY_ON_SUB(registers.a, sub))
             SET_BIT(registers.f, FLAG_H);
         else
             CLEAR_BIT(registers.f, FLAG_H);
@@ -1805,6 +2100,27 @@ uint64_t cpu_execute_inst(void)
 #endif
         registers.pc += 2;
         clock_cycles = 8;
+        break;
+
+    case 0xff: // RST 38 - Call to 0x38, SP=SP-2, (SP)=PC, PC=nnnn
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO_INST "(0x%04x) Exec 0x%x - RST 38 - Call to 0x38\n", registers.pc, inst);
+        }
+#endif
+
+        registers.sp -= 2;
+        memory_write_16(registers.sp, registers.pc + 1);
+        registers.pc = MEMORY_RST_38;
+#ifdef DEBUG
+        if (verbose & VERBOSE_CPU)
+        {
+            fprintf(stderr, P_INFO "Save PC(0x%x) at 0x%x\n", memory_read_16(registers.sp), registers.sp);
+            fprintf(stderr, P_INFO "Call to 0x%x\n", registers.pc);
+        }
+#endif
+        clock_cycles = 16;
         break;
 
     default:
